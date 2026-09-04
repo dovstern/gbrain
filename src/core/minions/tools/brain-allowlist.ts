@@ -208,6 +208,18 @@ export interface BuildBrainToolsOpts {
    */
   allowedSlugPrefixes?: readonly string[];
   /**
+   * `gbrain agent run --bound-slug-prefixes`, flows from
+   * SubagentHandlerData.bound_slug_prefixes via the handler. Threaded onto
+   * `OperationContext.auth.boundSlugPrefixes` so put_page's existing
+   * `enforceClientSlugFence` enforces it (see that field's doc comment for
+   * why this isn't just `allowedSlugPrefixes` under another name). When
+   * `allowedSlugPrefixes` is otherwise unset, also WIDENS it to these same
+   * prefixes (glob form) — see `boundPrefixesToSlugGlobs` — since the
+   * subagent's own default-sandbox check runs first and would otherwise
+   * block every write this flag is meant to unlock.
+   */
+  boundSlugPrefixes?: readonly string[];
+  /**
    * Brain source every tool-call OperationContext is scoped to (#1586).
    * Trusted (flows from SubagentHandlerData.source_id, which only
    * PROTECTED_JOB_NAMES-gated submitters can set); validated at build time.
@@ -224,6 +236,7 @@ interface OpContextDeps {
   signal?: AbortSignal;
   brainId?: string;
   allowedSlugPrefixes?: readonly string[];
+  boundSlugPrefixes?: readonly string[];
   sourceId?: string;
   deferEmbeds?: boolean;
 }
@@ -248,10 +261,33 @@ function buildOpContext(deps: OpContextDeps): OperationContext {
     allowedSlugPrefixes: deps.allowedSlugPrefixes
       ? [...deps.allowedSlugPrefixes]
       : undefined,
+    // No real OAuth identity exists for a CLI-submitted job — this
+    // synthesizes just enough AuthInfo for put_page's existing
+    // enforceClientSlugFence to see a bound_slug_prefixes ceiling and
+    // enforce it exactly as it would for an OAuth-bound client. clientId is
+    // a fixed label (audit-message readability only, not a real client row).
+    ...(deps.boundSlugPrefixes ? {
+      auth: { token: 'cli:agent-run', clientId: 'cli:agent-run', scopes: [], boundSlugPrefixes: [...deps.boundSlugPrefixes] },
+    } : {}),
     // #4216: server-side-only — the oneshot runner defers chunk embeddings on
     // its programmatic writes; never hydrated from any wire payload.
     ...(deps.deferEmbeds ? { deferEmbeds: true } : {}),
   };
+}
+
+/**
+ * Translate a bound_slug_prefixes-grammar prefix (bare entry admits itself +
+ * everything under it) into the trusted-workspace glob grammar
+ * `matchesSlugAllowList` expects (bare entry admits itself EXACTLY;
+ * `<prefix>/*` admits everything under it).
+ *
+ * Only the "everything under" span is carried over — a page at the bare
+ * prefix slug itself isn't separately admitted. Pages normally live a
+ * segment under a folder-shaped prefix, so this hasn't mattered in
+ * practice; widen by adding the bare form too if it ever does.
+ */
+function boundPrefixesToSlugGlobs(prefixes: readonly string[]): string[] {
+  return prefixes.map(p => `${p.replace(/\/+$/, '')}/*`);
 }
 
 /**
@@ -272,9 +308,19 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
   // through the job payload).
   if (opts.sourceId !== undefined) validateSourceId(opts.sourceId);
 
+  // --bound-slug-prefixes widens the subagent's default wiki/agents/<id>/
+  // sandbox to the operator-given prefixes so the write this flag is meant
+  // to unlock is actually reachable — enforceSubagentSlugFence runs BEFORE
+  // enforceClientSlugFence and would otherwise block it regardless of the
+  // bound_slug_prefixes ceiling set below. An explicit opts.allowedSlugPrefixes
+  // (the dream-cycle trusted-workspace caller) always wins; this only fills
+  // the gap when that field is unset.
+  const effectiveAllowedSlugPrefixes = opts.allowedSlugPrefixes
+    ?? (opts.boundSlugPrefixes ? boundPrefixesToSlugGlobs(opts.boundSlugPrefixes) : undefined);
+
   return picked.map<ToolDef>(op => {
     const schema = op.name === 'put_page'
-      ? namespacedPutPageSchema(op, opts.subagentId, opts.allowedSlugPrefixes)
+      ? namespacedPutPageSchema(op, opts.subagentId, effectiveAllowedSlugPrefixes)
       : paramsToInputSchema(op);
 
     const toolName = sanitizeToolName(op.name);
@@ -300,7 +346,8 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
           jobId: ctx.jobId,
           signal: ctx.signal,
           brainId: opts.brainId,
-          allowedSlugPrefixes: opts.allowedSlugPrefixes,
+          allowedSlugPrefixes: effectiveAllowedSlugPrefixes,
+          boundSlugPrefixes: opts.boundSlugPrefixes,
           sourceId: opts.sourceId,
           deferEmbeds: opts.deferEmbeds,
         });

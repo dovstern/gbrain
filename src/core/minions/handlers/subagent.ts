@@ -463,6 +463,8 @@ export function makeSubagentHandler(deps: SubagentDeps) {
       config,
       brainId: data.brain_id,
       allowedSlugPrefixes: data.allowed_slug_prefixes,
+      // `gbrain agent run --bound-slug-prefixes`.
+      boundSlugPrefixes: data.bound_slug_prefixes,
       // #1586: cycle-resolved source scope for tool-call OperationContexts.
       sourceId: data.source_id,
     });
@@ -529,6 +531,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
           config,
           brainId: data.brain_id,
           allowedSlugPrefixes: data.allowed_slug_prefixes,
+          boundSlugPrefixes: data.bound_slug_prefixes,
           sourceId: data.source_id,
           deferEmbeds: true,
         });

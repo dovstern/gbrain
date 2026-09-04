@@ -187,6 +187,61 @@ describe('buildBrainTools', () => {
   });
 });
 
+// `gbrain agent run --bound-slug-prefixes` — the CLI-side equivalent of an
+// OAuth-bound client's enforceClientSlugFence. Mirrors
+// test/client-slug-fence.test.ts's own scenarios for the CLI path instead
+// of the OAuth-client path.
+describe('boundSlugPrefixes (gbrain agent run write fence)', () => {
+  test('write inside --bound-slug-prefixes succeeds, even outside the default wiki/agents/<id> sandbox', async () => {
+    const tools = buildBrainTools({ subagentId: 99, engine, config, boundSlugPrefixes: ['chan-eng/'] });
+    const putPage = tools.find(t => t.name === 'brain_put_page');
+    const ctx: ToolCtx = { engine, jobId: 1, remote: true };
+    const res = await putPage!.execute(
+      { slug: 'chan-eng/standup-notes', content: '---\ntitle: Standup\n---\nbody' },
+      ctx,
+    );
+    expect(res).toBeTruthy();
+  });
+
+  test('write outside --bound-slug-prefixes is rejected with permission_denied', async () => {
+    const tools = buildBrainTools({ subagentId: 99, engine, config, boundSlugPrefixes: ['chan-eng/'] });
+    const putPage = tools.find(t => t.name === 'brain_put_page');
+    const ctx: ToolCtx = { engine, jobId: 1, remote: true };
+    await expect(
+      putPage!.execute({ slug: 'chan-product/roadmap', content: 'stub' }, ctx),
+    ).rejects.toBeInstanceOf(OperationError);
+  });
+
+  // Isolates enforceClientSlugFence itself, not the widened subagent
+  // namespace check derived from the same list: an explicit
+  // allowedSlugPrefixes (the dream-cycle trusted-workspace escape hatch)
+  // WINS over the boundSlugPrefixes-derived one, so a slug the subagent
+  // fence admits can still be rejected by the bound_slug_prefixes ceiling —
+  // the same "both fences apply" composition test/client-slug-fence.test.ts
+  // pins for the OAuth-client path.
+  test('a bound_slug_prefixes ceiling rejects a slug an explicit (wider) allowedSlugPrefixes would admit', async () => {
+    const tools = buildBrainTools({
+      subagentId: 99, engine, config,
+      allowedSlugPrefixes: ['wiki/agents/99/*'],
+      boundSlugPrefixes: ['chan-eng/'],
+    });
+    const putPage = tools.find(t => t.name === 'brain_put_page');
+    const ctx: ToolCtx = { engine, jobId: 1, remote: true };
+    const p = putPage!.execute({ slug: 'wiki/agents/99/notes', content: 'stub' }, ctx);
+    await expect(p).rejects.toBeInstanceOf(OperationError);
+    await expect(p).rejects.toThrow(/bound_slug_prefixes/);
+  });
+
+  test('empty-array boundSlugPrefixes denies all writes (fail-closed, matches enforceClientSlugFence)', async () => {
+    const tools = buildBrainTools({ subagentId: 99, engine, config, boundSlugPrefixes: [] });
+    const putPage = tools.find(t => t.name === 'brain_put_page');
+    const ctx: ToolCtx = { engine, jobId: 1, remote: true };
+    await expect(
+      putPage!.execute({ slug: 'wiki/agents/99/notes', content: 'stub' }, ctx),
+    ).rejects.toBeInstanceOf(OperationError);
+  });
+});
+
 describe('filterAllowedTools', () => {
   test('passes prefixed names through', () => {
     const tools = buildBrainTools({ subagentId: 1, engine, config });

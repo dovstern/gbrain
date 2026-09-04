@@ -101,6 +101,11 @@ SUBMITTING
                                   .gbrain-source, sources.default, ...) — see
                                   \`gbrain sources current\`
     --fanout-manifest <path>     JSON array of {prompt, input_vars?} — one child each
+    --bound-slug-prefixes <p1,p2>  Fence every brain_put_page (and add_timeline_entry)
+                                  call this run makes to slugs under these prefixes —
+                                  same enforcement + grammar as \`gbrain auth
+                                  register-client --bound-slug-prefixes\`. Default
+                                  (unset): the legacy wiki/agents/<job_id>/... sandbox.
     --follow                     Tail status until terminal (default on TTY)
     --detach                     Submit + print job id, exit immediately
 
@@ -148,6 +153,7 @@ interface RunFlags {
   timeoutMs?: number;
   source?: string;
   fanoutManifest?: string;
+  boundSlugPrefixes?: string[];
   follow: boolean;
   detach: boolean;
 }
@@ -214,6 +220,9 @@ function parseRunFlags(args: string[]): { flags: RunFlags; rest: string[] } {
       case '--timeout-ms':      flags.timeoutMs = parseIntFlagValue(requireFlagValue(args, ++i, a), a); break;
       case '--source':          flags.source = requireFlagValue(args, ++i, a); break;
       case '--fanout-manifest': flags.fanoutManifest = requireFlagValue(args, ++i, a); break;
+      // Same value grammar as `auth register-client --bound-slug-prefixes`
+      // (src/commands/auth.ts) — comma list, plain prefixes, no glob suffix.
+      case '--bound-slug-prefixes': flags.boundSlugPrefixes = requireFlagValue(args, ++i, a).split(',').map(s => s.trim()).filter(Boolean); break;
       case '--follow':          flags.follow = true; break;
       case '--no-follow':       flags.follow = false; break;
       case '--detach':          flags.detach = true; flags.follow = false; break;
@@ -315,6 +324,7 @@ export async function runAgentRun(engine: BrainEngine, args: string[]): Promise<
   if (flags.model) data.model = flags.model;
   if (flags.maxTurns) data.max_turns = flags.maxTurns;
   if (flags.tools && flags.tools.length > 0) data.allowed_tools = flags.tools;
+  if (flags.boundSlugPrefixes && flags.boundSlugPrefixes.length > 0) data.bound_slug_prefixes = flags.boundSlugPrefixes;
 
   const submitOpts: Partial<MinionJobInput> = { max_stalled: 3 };
   if (flags.timeoutMs) submitOpts.timeout_ms = flags.timeoutMs;
@@ -371,6 +381,7 @@ async function runFanout(engine: BrainEngine, queue: MinionQueue, flags: RunFlag
       ...(flags.model ? { model: flags.model } : {}),
       ...(flags.maxTurns ? { max_turns: flags.maxTurns } : {}),
       ...(flags.tools && flags.tools.length > 0 ? { allowed_tools: flags.tools } : {}),
+      ...(flags.boundSlugPrefixes && flags.boundSlugPrefixes.length > 0 ? { bound_slug_prefixes: flags.boundSlugPrefixes } : {}),
     };
     const submitOpts: Partial<MinionJobInput> = { max_stalled: 3 };
     if (flags.timeoutMs) submitOpts.timeout_ms = flags.timeoutMs;
@@ -405,6 +416,7 @@ async function runFanout(engine: BrainEngine, queue: MinionQueue, flags: RunFlag
       ...(flags.model ? { model: flags.model } : {}),
       ...(flags.maxTurns ? { max_turns: flags.maxTurns } : {}),
       ...(flags.tools && flags.tools.length > 0 ? { allowed_tools: flags.tools } : {}),
+      ...(flags.boundSlugPrefixes && flags.boundSlugPrefixes.length > 0 ? { bound_slug_prefixes: flags.boundSlugPrefixes } : {}),
     };
     const submitOpts: Partial<MinionJobInput> = {
       parent_job_id: aggregator.id,

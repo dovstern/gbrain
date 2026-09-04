@@ -547,6 +547,26 @@ export interface SubagentHandlerData {
    */
   allowed_slug_prefixes?: string[];
   /**
+   * `gbrain agent run --bound-slug-prefixes`. Plain-prefix grammar (matches
+   * `enforceClientSlugFence`'s `oauth_clients.bound_slug_prefixes`, NOT
+   * `allowed_slug_prefixes`'s glob grammar above): a bare entry matches that
+   * whole segment plus everything under it.
+   *
+   * Threaded to `OperationContext.auth.boundSlugPrefixes` at tool-call time
+   * so put_page's EXISTING `enforceClientSlugFence` check — the same one an
+   * OAuth-bound client's direct writes go through — enforces it here too,
+   * instead of a second, divergent fence implementation. Also widens the
+   * default `wiki/agents/<subagentId>/...` sandbox (`allowed_slug_prefixes`
+   * above) to these prefixes when that field is otherwise unset, since
+   * without it no write outside the sandbox would ever reach the new check.
+   *
+   * Same trust story as `allowed_slug_prefixes`: PROTECTED_JOB_NAMES gates
+   * subagent submission, so only direct CLI submitters set it. Empty array
+   * fails closed (denies every write) — same posture as bound_slug_prefixes
+   * everywhere else it's read.
+   */
+  bound_slug_prefixes?: string[];
+  /**
    * Brain source the subagent's tool calls are scoped to (#1586).
    *
    * When set, every tool-call `OperationContext.sourceId` uses this value

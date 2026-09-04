@@ -58,6 +58,12 @@ describe('parseRunFlags', () => {
     expect(flags.tools).toEqual(['brain_search', 'brain_get_page']);
   });
 
+  // Same split/trim/filter convention as --tools.
+  test('--bound-slug-prefixes comma-split', () => {
+    const { flags } = agentTesting.parseRunFlags(['--bound-slug-prefixes', 'chan-eng/, emp-alice/', 'prompt']);
+    expect(flags.boundSlugPrefixes).toEqual(['chan-eng/', 'emp-alice/']);
+  });
+
   test('--detach implies !follow', () => {
     const { flags } = agentTesting.parseRunFlags(['--detach', 'x']);
     expect(flags.detach).toBe(true);
