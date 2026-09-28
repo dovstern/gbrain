@@ -74,10 +74,17 @@ function publishFile(file: NonNullable<PreparedMutation['file']>, stagingPath?: 
 // Effect recovery uses the same confined durable publication primitive, under
 // its own recovery record and native root capability.
 export { fileHash as persistenceFileHash, publishFile as publishPersistenceFile };
-function requestError(error: unknown): { code: string; message: string } {
+export function requestError(error: unknown): { code: string; message: string } {
   if (error instanceof OperationError) return { code: error.code, message: error.message };
   const code = (error as { code?: string })?.code;
-  if (code === 'revision_conflict') return { code, message: 'The page changed after the supplied revision was read.' };
+  // PageRevisionConflictError's own message already distinguishes "no
+  // expected_revision was supplied for an existing page" from "the revision
+  // supplied is now stale" — surface it instead of a generic string that
+  // always implies the latter, which reads as a false staleness/race report
+  // when the caller simply never passed expected_revision.
+  if (code === 'revision_conflict') {
+    return { code, message: error instanceof Error && error.message ? error.message : 'The page changed after the supplied revision was read.' };
+  }
   return { code: 'storage_error', message: `Publication failed${code ? ` (${code})` : ''}. Inspect owner diagnostics.` };
 }
 function conflictCode(code: string): boolean { return ['revision_required','revision_conflict','source_changed','page_identity_changed'].includes(code); }
