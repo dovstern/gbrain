@@ -11,6 +11,8 @@ import { OperationError } from '../ops/contract.ts';
 import { assertPageRevision, type PageSnapshot } from '../page-state/types.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
 import { recordedPathFromFileUri, scannerSourcePath } from '../write-through.ts';
+import { stripTakesFence } from '../takes-fence.ts';
+import { stripFactsFence } from '../facts-fence.ts';
 import { engineMutationPrecondition, parseMutationPrecondition } from './preconditions.ts';
 import { assertPurgeParams } from './purge-params.ts';
 import { authorizeWrite } from './authority.ts';
@@ -80,9 +82,26 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
   // Unknown local edits require explicit import/recovery, even for force writes.
   if (before && snapshot) {
     const parsed = parseMarkdown(before.toString('utf8'), row.slug);
-    const expected = canonical(snapshot.page, snapshot.tags);
-    const actual = canonical({ ...parsed, ...await overlayCanonicalBodies(engine.executeRaw.bind(engine),
-      parsed.compiled_truth, parsed.timeline ?? '', snapshot.withdrawals) }, parsed.tags);
+    // #5660: takes/facts fences are markdown-canonical (physically part of
+    // the file) but are NOT folded into pages.compiled_truth by their own
+    // write-through paths (takes-write.ts writes the file + a side table,
+    // never compiled_truth). Comparing raw compiled_truth here would flag
+    // every fence-carrying file as an "uncoordinated local edit" on its very
+    // first unrelated mutation, since the file legitimately carries text the
+    // DB never tracked. Strip both fences before comparing — the same
+    // exclusion retrieval-reflex.ts and link-manifest.ts already apply to
+    // compiled_truth for the identical reason.
+    // upsertTakeRow auto-generates a leading "## Takes" heading the very
+    // first time a fence is added to a page (takes-fence.ts's own append-only
+    // contract); stripTakesFence only removes the fence markers themselves,
+    // leaving that heading as an orphan diff. Fold it in here rather than in
+    // the shared strip helper, which other callers (chunking) rely on for
+    // ONLY the fence body.
+    const stripFences = (body: string) => stripFactsFence(stripTakesFence(body)).replace(/\n*## Takes\n*$/, '');
+    const expected = canonical({ ...snapshot.page, compiled_truth: stripFences(snapshot.page.compiled_truth) }, snapshot.tags);
+    const actualOverlay = { ...parsed, ...await overlayCanonicalBodies(engine.executeRaw.bind(engine),
+      parsed.compiled_truth, parsed.timeline ?? '', snapshot.withdrawals) };
+    const actual = canonical({ ...actualOverlay, compiled_truth: stripFences(actualOverlay.compiled_truth) }, parsed.tags);
     // Withdrawal overlays intentionally precede physical mirroring. The ledger
     // is applied by the import preparation and cannot be undone by this check.
     if (digest(actual) !== digest(expected)) {

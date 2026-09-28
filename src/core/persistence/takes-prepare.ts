@@ -1,13 +1,15 @@
+import { existsSync, readFileSync } from 'node:fs';
 import type { BrainEngine, TakeBatchInput } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import { OperationError, type OperationContext } from '../ops/contract.ts';
 import { parseTakesFence, upsertTakeRow, supersedeRow, type ParsedTake, type TakeQuality } from '../takes-fence.ts';
-import { takesPreparation as edit, TakesWriteError } from '../takes-write.ts';
+import { takesPreparation as edit, TakesWriteError, resolveTakesRepoDir, resolveTakesWritePath } from '../takes-write.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
-import { preparePageMutation } from './page-prepare.ts';
+import { preparePageMutation, prepareFileTarget } from './page-prepare.ts';
 import { authorizeTakeHolder } from './authority.ts';
 import type { WriteRequest } from './model.ts';
 import type { PreparedMutation } from './coordinator.ts';
+import type { PageSnapshot } from '../page-state/types.ts';
 import { assertPageRevision } from '../page-state/types.ts';
 import { engineMutationPrecondition, parseMutationPrecondition } from './preconditions.ts';
 
@@ -34,8 +36,35 @@ export async function normalizeTakesIntent(ctx: OperationContext, params: Record
 function fail(error: unknown): never {
   if (!(error instanceof TakesWriteError)) throw error;
   const code = error.code === 'holder_denied' ? 'permission_denied' : error.code === 'row_not_found' ? 'not_found'
-    : error.code === 'page_not_found' ? 'page_not_found' : 'invalid_params';
+    : error.code === 'page_not_found' ? 'page_not_found'
+    : error.code === 'mirror_unavailable' ? 'unavailable' : 'invalid_params';
   throw new OperationError(code, error.message, error.hint);
+}
+
+/**
+ * #5660: the fence is markdown-canonical (takes-write.ts's own contract) but
+ * is NOT part of pages.compiled_truth -- a row promoted via takes-write.ts's
+ * file-only write-through (e.g. `takes propose --accept`, which calls
+ * addTakeToPage directly) never lands in compiled_truth, only in the
+ * physical file and the `takes` table. Reconstructing the working body from
+ * compiled_truth therefore silently drops every such row. Read the real file
+ * instead -- resolved the SAME way preparePageMutation's own prepareFileTarget
+ * resolves it (worktree-binding aware) so this never diverges from where the
+ * real write actually lands. Falls back to the DB reconstruction only when
+ * there is no file to read (matching the prior, file-agnostic behavior, and
+ * leaving the "file missing" refusal itself to preparePageMutation's own
+ * check on the real write below).
+ */
+async function resolveCurrentFenceBody(engine: BrainEngine, row: WriteRequest, snapshot: PageSnapshot): Promise<string> {
+  const fallback = serializePageToMarkdown(snapshot.page, snapshot.tags);
+  if (row.worktree_id) {
+    const target = await prepareFileTarget(engine, row, snapshot, null, undefined, { allowMissing: true });
+    if (target && existsSync(target.path)) return readFileSync(target.path, 'utf-8');
+    return fallback;
+  }
+  const brainDir = await resolveTakesRepoDir(engine);
+  const { path } = await resolveTakesWritePath(engine, brainDir, row.slug, row.source_id);
+  return existsSync(path) ? readFileSync(path, 'utf-8') : fallback;
 }
 export async function prepareTakesMutation(engine: BrainEngine, row: WriteRequest, config: GBrainConfig): Promise<PreparedMutation> {
   try { return await prepare(engine,row,config); } catch (error) { return fail(error); }
@@ -45,7 +74,7 @@ async function prepare(engine: BrainEngine, row: WriteRequest, config: GBrainCon
   if (!snapshot || snapshot.page.id !== row.page_id) throw new OperationError('page_identity_changed','The accepted page no longer exists.');
   const p = row.intent!;
   if (p.expected_revision !== undefined) assertPageRevision(snapshot,engineMutationPrecondition(parseMutationPrecondition(p)));
-  const body = serializePageToMarkdown(snapshot.page,snapshot.tags);
+  const body = await resolveCurrentFenceBody(engine, row, snapshot);
   const parsed = parseTakesFence(body);
   edit.assertFenceRoundTrips(parsed);
   for (const key of ['claim','kind','holder','source','evidence','unit','resolved_by']) {
