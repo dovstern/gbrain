@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { ALL_PHASES } from '../src/core/cycle.ts';
 import { runPhaseTakeContradictions, __testing } from '../src/core/cycle/take-contradictions.ts';
 import { generateActiveTakesPairs } from '../src/core/eval-contradictions/active-takes-pairing.ts';
@@ -211,13 +212,14 @@ test('take_contradictions is registered in ALL_PHASES', () => {
 });
 
 test('internal config loader defaults match documented defaults when unset', async () => {
-  const engine2 = new PGLiteEngine();
-  await engine2.connect({});
-  await engine2.initSchema();
-  const cfg = await __testing.loadTakeContradictionsConfig(engine2);
+  // Unit-level: a minimal getConfig-only stub, not a second PGLiteEngine
+  // (scripts/check-test-isolation.sh rule R3 — one real engine per file,
+  // created in beforeAll). loadTakeContradictionsConfig only ever calls
+  // engine.getConfig, so that's all this stub needs to satisfy.
+  const stubEngine = { getConfig: async () => null } as unknown as BrainEngine;
+  const cfg = await __testing.loadTakeContradictionsConfig(stubEngine);
   expect(cfg).toEqual({
     enabled: false, budgetUsd: 1.0, maxPerCycle: 20,
     maxCandidateTakes: 300, maxPerHolderPairs: 5, maxNeighborsPerTake: 3,
   });
-  await engine2.disconnect();
 });
