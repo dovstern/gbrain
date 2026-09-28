@@ -55,6 +55,7 @@ import { resolvePageFilePath, resolveSourceLocalFilePath } from './markdown.ts';
 import { sanitizeRecordedSourcePath, recordedPathFromFileUri } from './write-through.ts';
 import { isWriteTargetContained, msysToNativePath } from './path-confine.ts';
 import { atomicWriteFileSync } from './atomic-write.ts';
+import { commitWriteThroughFile } from './brain-repo-durability.ts';
 
 export type TakesWriteErrorCode =
   | 'page_not_found'      // slug has no pages row (scoped)
@@ -101,11 +102,28 @@ export interface TakesWriteTarget {
  * `mirror_warning` carries the DB-mirror error when it happened; `written` is
  * still true because the markdown row is on disk.
  */
-export interface TakeMirror { written: true; path: string; mirror_warning?: string }
+export interface TakeMirror { written: true; path: string; mirror_warning?: string; commit_warning?: string }
 
 /** DB-mirror failures are non-fatal (md is canonical) — stringify for the warning. */
 function mirrorErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Land the just-written fence file in git, the same way every other durable
+ * write in this codebase does (put_page, delete_page, restore_page). Without
+ * this, `writePageBody` above leaves the file on disk only — a caller several
+ * layers up (the CLI's own commit message calls this "write-through", and a
+ * batch caller can reasonably assume the same durability every other write-
+ * through path provides) gets no signal that nothing was committed, and a
+ * corpus-wide accept run can silently leave hundreds of files uncommitted.
+ * Best-effort and non-fatal, mirroring the DB-mirror try/catch beside every
+ * call site: md is already durable on disk, and a failed commit is a warning,
+ * never a reason to throw (a throw would make the caller retry and duplicate
+ * the on-disk row this write already applied).
+ */
+function commitTakesWrite(writeRoot: string, path: string, slug: string): string | undefined {
+  return commitWriteThroughFile(writeRoot, path, slug) ? undefined : 'commit_failed: the fence write landed on disk but could not be committed to git.';
 }
 
 /**
@@ -478,6 +496,7 @@ export async function addTakeToPage(
       active: true,
     });
     writePageBody(path, nextBody, writeRoot);
+    const commitWarning = commitTakesWrite(writeRoot, path, target.slug);
     let mirrorWarning: string | undefined;
     try {
       await target.engine.addTakesBatch([{
@@ -492,7 +511,7 @@ export async function addTakeToPage(
       // (a throw would make the caller retry and duplicate the durable md row).
       mirrorWarning = mirrorErrorMessage(err);
     }
-    return { rowNum, mirror: { written: true, path, ...(mirrorWarning ? { mirror_warning: mirrorWarning } : {}) } };
+    return { rowNum, mirror: { written: true, path, ...(mirrorWarning ? { mirror_warning: mirrorWarning } : {}), ...(commitWarning ? { commit_warning: commitWarning } : {}) } };
   });
 }
 
@@ -555,6 +574,7 @@ export async function appendTakesToPageMdFirst(
       rowNums.push(r.rowNum);
     }
     writePageBody(path, nextBody, writeRoot);
+    const commitWarning = commitTakesWrite(writeRoot, path, target.slug);
     // Mirror md→DB with the reconcile primitive, exactly as the fence now
     // states the appended rows.
     const appended = new Set(rowNums);
@@ -565,7 +585,7 @@ export async function appendTakesToPageMdFirst(
     } catch (err) {
       mirrorWarning = mirrorErrorMessage(err); // P1-4/F4: md written; DB mirror deferred to reconcile.
     }
-    return { rowNums, mirror: { written: true, path, ...(mirrorWarning ? { mirror_warning: mirrorWarning } : {}) } };
+    return { rowNums, mirror: { written: true, path, ...(mirrorWarning ? { mirror_warning: mirrorWarning } : {}), ...(commitWarning ? { commit_warning: commitWarning } : {}) } };
   });
 }
 
@@ -611,6 +631,7 @@ export async function updateTakeOnPage(
     };
     const allRows = parsed.takes.map(t => (t.rowNum === rowNum ? updated : t));
     writePageBody(path, replaceFence(body, allRows), writeRoot);
+    const commitWarning = commitTakesWrite(writeRoot, path, target.slug);
     // Mirror md→DB with the reconcile primitive (upsert on (page_id,row_num));
     // base columns only, resolution columns preserved by the DO UPDATE list.
     let mirrorWarning: string | undefined;
@@ -619,7 +640,7 @@ export async function updateTakeOnPage(
     } catch (err) {
       mirrorWarning = mirrorErrorMessage(err); // P1-4/F4: md written; DB mirror deferred to reconcile.
     }
-    return { rowNum, mirror: { written: true, path, ...(mirrorWarning ? { mirror_warning: mirrorWarning } : {}) } };
+    return { rowNum, mirror: { written: true, path, ...(mirrorWarning ? { mirror_warning: mirrorWarning } : {}), ...(commitWarning ? { commit_warning: commitWarning } : {}) } };
   });
 }
 
@@ -673,6 +694,7 @@ export async function supersedeTakeOnPage(
       source: input.source,
     });
     writePageBody(path, nextBody, writeRoot);
+    const commitWarning = commitTakesWrite(writeRoot, path, target.slug);
     // Mirror BOTH affected rows exactly as the fence now states them:
     // old → inactive + superseded_by pointer, new → active append.
     const after = parseTakesFence(nextBody).takes;
@@ -687,7 +709,7 @@ export async function supersedeTakeOnPage(
     } catch (err) {
       mirrorWarning = mirrorErrorMessage(err); // P1-4/F4: md written; DB mirror deferred to reconcile.
     }
-    return { oldRow: rowNum, newRow: newRowNum, mirror: { written: true, path, ...(mirrorWarning ? { mirror_warning: mirrorWarning } : {}) } };
+    return { oldRow: rowNum, newRow: newRowNum, mirror: { written: true, path, ...(mirrorWarning ? { mirror_warning: mirrorWarning } : {}), ...(commitWarning ? { commit_warning: commitWarning } : {}) } };
   });
 }
 
@@ -743,6 +765,7 @@ export async function resolveTakeOnPage(
     };
     const allRows = parsed.takes.map(t => (t.rowNum === rowNum ? updated : t));
     writePageBody(path, replaceFence(body, allRows), writeRoot);
+    const commitWarning = commitTakesWrite(writeRoot, path, target.slug);
     // Resolution fields aren't in TakeBatchInput — mirror via resolveTake.
     // A drifted DB missing the row is self-healed md→DB (upsert the base row,
     // then resolve): the markdown is the truth being propagated.
@@ -775,7 +798,7 @@ export async function resolveTakeOnPage(
         mirrorWarning = mirrorErrorMessage(err);
       }
     }
-    return { rowNum, quality: input.quality, mirror: { written: true, path, ...(mirrorWarning ? { mirror_warning: mirrorWarning } : {}) } };
+    return { rowNum, quality: input.quality, mirror: { written: true, path, ...(mirrorWarning ? { mirror_warning: mirrorWarning } : {}), ...(commitWarning ? { commit_warning: commitWarning } : {}) } };
   });
 }
 
