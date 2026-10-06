@@ -1671,6 +1671,10 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // defaults fail-closed to max(--token-ttl, min).
   'oauth.dcr_ttl_min_seconds',
   'oauth.dcr_ttl_max_seconds',
+  // Source a self-registered (DCR) client reads from and writes to. Read by
+  // `gbrain serve --http` at startup; unset (or an inactive source) keeps
+  // `default`.
+  'oauth.dcr_default_source',
   'embed.backfill_cooldown_min',
   'embed.backfill_max_usd_per_source_24h',
   'embed.backfill_max_usd',

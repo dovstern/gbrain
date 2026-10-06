@@ -424,6 +424,19 @@ gbrain config set oauth.dcr_ttl_min_seconds 600
 gbrain config set oauth.dcr_ttl_max_seconds 86400
 ```
 
+A self-registered client reads from and writes to the `default` source. If your
+content lives in a named source, point new clients at it instead; the server
+reads this at startup, so restart `gbrain serve --http` after changing it:
+
+```bash
+gbrain config set oauth.dcr_default_source my-docs
+```
+
+The source must exist and not be archived. If it is not, the server logs a
+warning and keeps `default`. Clients registered earlier keep the source they
+were given; move those with `gbrain auth rescope-client <id> --source <id>
+--federated-read <id>`.
+
 ### 3. Expose the server
 
 **Tailscale (recommended).** `gbrain mcp expose` does this whole section for

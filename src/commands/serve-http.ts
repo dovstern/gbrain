@@ -38,6 +38,7 @@ import { operations, type Operation } from '../core/operations.ts';
 import {
   GBrainOAuthProvider,
   DEFAULT_DCR_TTL_MIN_SECONDS,
+  resolveDcrDefaultSource,
 } from '../core/oauth-provider.ts';
 import { canonicalOAuthResource } from '../core/oauth-grants.ts';
 import type { McpSurface } from '../mcp/surface.ts';
@@ -636,6 +637,9 @@ export async function buildServeHttpApp(app: express.Express, engine: BrainEngin
   // window collapses to the min bound — the same direction clampDcrTokenTtl
   // itself resolves. A bad config narrows the window; it never widens it.
   const { dcrTtlMinSeconds, dcrTtlMaxSeconds } = await resolveDcrTtlWindow(engine, tokenTtl);
+  // DB-plane `oauth.dcr_default_source`: the source self-registered clients
+  // land on. A read failure keeps the historical `default`.
+  const dcrDefaultSourceId = await resolveDcrDefaultSource(engine).catch(() => undefined);
 
   // The issuer URL goes into discovery metadata + token iss claims. It MUST
   // match the URL clients actually hit, or strict OAuth clients reject tokens
@@ -673,6 +677,7 @@ export async function buildServeHttpApp(app: express.Express, engine: BrainEngin
     allowClientCredentialsDcr: enableDcrInsecure === true,
     dcrTtlMinSeconds,
     dcrTtlMaxSeconds,
+    dcrDefaultSourceId,
     resourceUrl: mcpResourceUrl,
   });
 

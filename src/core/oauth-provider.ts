@@ -265,6 +265,12 @@ interface GBrainOAuthProviderOptions {
    * the admin explicitly widened the window.
    */
   dcrTtlMaxSeconds?: number;
+  /**
+   * Source a self-registered (DCR) client reads from and writes to. Unset
+   * keeps the historical `default`. Resolved at startup by
+   * `resolveDcrDefaultSource` from the `oauth.dcr_default_source` config key.
+   */
+  dcrDefaultSourceId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +286,35 @@ interface GBrainOAuthProviderOptions {
  * client can never out-live the server default without explicit admin opt-in.
  */
 export const DEFAULT_DCR_TTL_MIN_SECONDS = 300; // 5 minutes
+
+// ---------------------------------------------------------------------------
+// DCR default source
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the `oauth.dcr_default_source` config key and validate it against the
+ * `sources` table. Returns the source id, or undefined when the key is unset
+ * or names a source that is missing or archived (the provider then keeps
+ * `default`, and a warning says why). A typo therefore never points new
+ * clients at a source that cannot serve them.
+ */
+export async function resolveDcrDefaultSource(engine: {
+  getConfig(key: string): Promise<string | null>;
+  executeRaw<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
+}): Promise<string | undefined> {
+  const raw = (await engine.getConfig('oauth.dcr_default_source'))?.trim();
+  if (!raw) return undefined;
+  const rows = await engine.executeRaw<{ id: string }>(
+    'SELECT id FROM sources WHERE id = $1 AND archived IS NOT TRUE',
+    [raw],
+  );
+  if (rows.length > 0) return raw;
+  console.error(
+    `[serve-http] WARNING: oauth.dcr_default_source names "${raw}", which is not an active source; ` +
+    'self-registered clients stay on "default".',
+  );
+  return undefined;
+}
 
 /**
  * Clamp a DCR-requested token TTL into the admin-configured [min, max]
@@ -320,6 +355,7 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
     private allowClientCredentialsDcr: boolean,
     private dcrTtlMin: number,
     private dcrTtlMax: number,
+    private dcrSourceId: string,
   ) {}
 
   async getClient(clientId: string): Promise<OAuthClientInformationFull | undefined> {
@@ -439,7 +475,8 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
 
     // v0.34.1 (#861, D2 + D13 + #876): DCR clients get source_id='default'
     // (matches legacy fallback) and federated_read=['default'] (read scope
-    // == write scope). Operators who need narrower / wider scope rescope
+    // == write scope). `oauth.dcr_default_source` swaps in another source
+    // for both axes. Operators who need narrower / wider scope rescope
     // via the CLI later. Pre-v60/v61 brain falls through to the legacy
     // projection (no source_id / federated_read column yet).
     try {
@@ -451,7 +488,7 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
                 ${pgArray((client.redirect_uris || []).map(String))},
                 ${pgArray(grantTypes)},
                 ${registeredScope}, ${authMethod},
-                ${now}, ${'default'}, ${pgArray(['default'])})
+                ${now}, ${this.dcrSourceId}, ${pgArray([this.dcrSourceId])})
       `;
     } catch (err) {
       if (isUndefinedColumnError(err, 'federated_read')) {
@@ -464,7 +501,7 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
                     ${pgArray((client.redirect_uris || []).map(String))},
                     ${pgArray(grantTypes)},
                     ${registeredScope}, ${authMethod},
-                    ${now}, ${'default'})
+                    ${now}, ${this.dcrSourceId})
           `;
         } catch (err2) {
           if (isUndefinedColumnError(err2, 'source_id')) {
@@ -573,6 +610,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       options.allowClientCredentialsDcr === true,
       dcrTtlMin,
       dcrTtlMax,
+      options.dcrDefaultSourceId || 'default',
     );
   }
 
