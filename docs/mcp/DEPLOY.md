@@ -434,8 +434,9 @@ gbrain config set oauth.dcr_default_source my-docs
 
 The source must exist and not be archived. If it is not, the server logs a
 warning and keeps `default`. Clients registered earlier keep the source they
-were given; move those with `gbrain auth rescope-client <id> --source <id>
---federated-read <id>`.
+were given; move those with the
+[owner permission-edit path](ADMIN.md#inspect-clients-and-edit-access) or the
+admin dashboard's Agents page, which act on the running server.
 
 ### 3. Expose the server
 
