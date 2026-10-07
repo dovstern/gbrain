@@ -564,6 +564,49 @@ describe('link validator', () => {
     expect(findings).toEqual([]);
   });
 
+  describe('relative links resolve against the linking page directory', () => {
+    const validate = (slug: string, compiledTruth: string) => linkValidator.validate({
+      slug, type: 'concept', compiledTruth, timeline: '', frontmatter: {}, engine,
+    });
+    const putPage = (slug: string) =>
+      engine.putPage(slug, { type: 'concept', title: slug, compiled_truth: 'x', frontmatter: {} });
+
+    test('a correct link from a deeply nested page is not dangling', async () => {
+      await putPage('team_brains/paas/external-people/noam');
+      const findings = await validate(
+        'team_brains/paas/external-organizations/idf/maof',
+        'Contact: [Noam](../../external-people/noam.md).',
+      );
+      expect(findings).toEqual([]);
+    });
+
+    test('a link with the wrong depth is flagged and names the slug it resolved to', async () => {
+      await putPage('team_brains/paas/meetings/weekly');
+      const findings = await validate(
+        'team_brains/paas/external-organizations/idf/maof',
+        'See [Weekly](../meetings/weekly.md).',
+      );
+      expect(findings).toHaveLength(1);
+      expect(findings[0].severity).toBe('error');
+      expect(findings[0].message).toContain('team_brains/paas/external-organizations/meetings/weekly');
+    });
+
+    test('./ links resolve against the page directory and match the stored slug casing', async () => {
+      await putPage('a/b/sibling-page');
+      expect(await validate('a/b/page', 'See [S](./Sibling-Page.md).')).toEqual([]);
+    });
+
+    test('a ../ link that does not exist from the page directory still falls back to the root-relative slug', async () => {
+      await putPage('people/alice');
+      expect(await validate('daily/2026/note', 'With [Alice](../people/alice.md).')).toEqual([]);
+    });
+
+    test('a link that climbs above the brain root is a warning, not a crash', async () => {
+      const findings = await validate('a/b', 'See [X](../../../x.md).');
+      expect(findings.every(f => f.severity === 'warning')).toBe(true);
+    });
+  });
+
   test('ignores external URLs', async () => {
     const findings = await linkValidator.validate({
       slug: 'concepts/x',

@@ -9,11 +9,17 @@
  *     Dangling links emit an error.
  *   - Anything else (mailto:, internal anchors) → warning.
  *
- * We strip leading "../" components so a link from a daily file written as
- * `../../people/alice.md` resolves to the `people/alice` slug the engine
- * knows. This matches how engine.addLink is called downstream.
+ * A `./` or `../` link is resolved against the linking page's own directory
+ * and slugified the way the importer slugifies paths, so a page in a nested
+ * layout (`a/b/c/page` linking `../../x.md` -> `a/x`) finds its target's
+ * stored slug and a link with the wrong depth is reported. The older reading
+ * (strip the leading dots, treat the rest as a root-relative slug) is kept as
+ * a fallback, so a flat brain whose links were written that way still resolves.
+ * This matches how engine.addLink is called downstream.
  */
 
+import { posix } from 'path';
+import { slugifyPath } from '../../sync.ts';
 import type { PageValidator, PageValidationContext, ValidationFinding } from '../writer.ts';
 
 const MD_LINK_RE = /\[([^\]]+)\]\(([^)]+)\)/g;
@@ -25,9 +31,7 @@ export const linkValidator: PageValidator = {
     const findings: ValidationFinding[] = [];
     const body = `${ctx.compiledTruth}\n${ctx.timeline}`;
 
-    // Collect unique internal targets first to batch engine lookups.
-    const internalTargets = new Set<string>();
-    const linkPositions = new Map<string, { display: string; raw: string; line: number }[]>();
+    const links: { display: string; line: number; candidates: string[] }[] = [];
 
     for (const { match, line } of iterateLinks(body)) {
       const [, display, href] = match;
@@ -44,8 +48,8 @@ export const linkValidator: PageValidator = {
         continue;
       }
 
-      const slug = normalizeToSlug(href);
-      if (!slug) {
+      const candidates = linkSlugCandidates(href, ctx.slug);
+      if (candidates.length === 0) {
         findings.push({
           slug: ctx.slug,
           validator: 'link',
@@ -56,31 +60,28 @@ export const linkValidator: PageValidator = {
         continue;
       }
 
-      internalTargets.add(slug);
-      const list = linkPositions.get(slug) ?? [];
-      list.push({ display, raw: href, line });
-      linkPositions.set(slug, list);
+      links.push({ display, line, candidates });
     }
 
-    // Batch-check which targets exist within the validation read scope.
+    // One engine lookup per distinct candidate slug, within the validation read scope.
     const sourceOpts = ctx.sourceIds && ctx.sourceIds.length > 0
       ? { sourceIds: ctx.sourceIds }
       : ctx.sourceId
         ? { sourceId: ctx.sourceId }
         : undefined;
-    for (const slug of internalTargets) {
-      const page = await ctx.engine.getPage(slug, sourceOpts);
-      if (page) continue;
-      const positions = linkPositions.get(slug) ?? [];
-      for (const pos of positions) {
-        findings.push({
-          slug: ctx.slug,
-          validator: 'link',
-          severity: 'error',
-          line: pos.line,
-          message: `Dangling wikilink to ${slug} (no such page)`,
-        });
-      }
+    const exists = new Map<string, boolean>();
+    for (const slug of new Set(links.flatMap(l => l.candidates))) {
+      exists.set(slug, !!(await ctx.engine.getPage(slug, sourceOpts)));
+    }
+    for (const { line, candidates } of links) {
+      if (candidates.some(c => exists.get(c))) continue;
+      findings.push({
+        slug: ctx.slug,
+        validator: 'link',
+        severity: 'error',
+        line,
+        message: `Dangling wikilink to ${candidates[0]} (no such page)`,
+      });
     }
 
     return findings;
@@ -119,6 +120,26 @@ export function normalizeToSlug(href: string): string | null {
   // Must look like dir/name (or dir/name/subname)
   if (!/^[a-z0-9][a-z0-9\-]*(\/[a-z0-9][a-z0-9\-]*)+$/i.test(s)) return null;
   return s.toLowerCase();
+}
+
+/**
+ * Candidate slugs for a link href, best first. A `./` or `../` href resolves
+ * against `fromSlug`'s directory; a path that climbs above the brain root has
+ * no resolved candidate. The root-relative reading from normalizeToSlug follows.
+ */
+export function linkSlugCandidates(href: string, fromSlug: string): string[] {
+  const out: string[] = [];
+  const h = href.trim();
+  if (/^\.\.?\//.test(h)) {
+    const joined = posix.normalize(posix.join(posix.dirname(fromSlug), h));
+    if (joined !== '..' && !joined.startsWith('../')) {
+      const resolved = slugifyPath(joined);
+      if (resolved) out.push(resolved);
+    }
+  }
+  const legacy = normalizeToSlug(href);
+  if (legacy && !out.includes(legacy)) out.push(legacy);
+  return out;
 }
 
 /**
