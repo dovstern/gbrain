@@ -9,6 +9,8 @@ import type { GitCommitNote } from './effect-model.ts';
 import { persistenceHome } from './identity.ts';
 import { nativeFileTarget } from './native-file-target.ts';
 import { gitChildEnv } from '../git-env.ts';
+import { commitAndPush } from '../git/commit-push.ts';
+import { withFilesystemPublication } from './filesystem-guard.ts';
 import type { Action } from '../agent-output.ts';
 import type { NativeLockHandle } from './native-lock.ts';
 import { proveIndexLockAbandoned, reclaimIndexLock, type IndexLockReclaim } from './index-lock-reclaim.ts';
@@ -299,20 +301,35 @@ export async function commitGitTargets(root: string, relativePaths: string[], si
   return results;
 }
 
-/** Push the current branch to its tracking remote once. A plain push is idempotent and cannot import remote canonical content. */
+/**
+ * Publish the current branch to its tracking remote through the shared-checkout protocol (#6530,
+ * src/core/git/commit-push.ts): a push the remote rejected because it moved is merged with the remote in memory and
+ * the merge is pushed. A plain push cannot recover there: this worker never pulls, so every later push would be
+ * rejected the same way. The checkout never moves (remote files reach a managed worktree only through
+ * `gbrain sources refresh`, which can fast-forward once the merge is published); nothing is rebased, stashed or reset.
+ * Caller owns the native worktree lock; the effect worker is the canonical writer of a managed worktree, so the
+ * managed fence admits it.
+ */
 export async function pushGitRoot(root: string, signal?: AbortSignal): Promise<{ push: 'committed' } | { push: 'skipped'; reason: 'no_tracking_remote' }> {
-  return withSession(root, signal, undefined, false, async session => {
+  const tracked = await withSession(root, signal, undefined, false, async session => {
     const branch = await git(session, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
-    if (branch.code !== 0) return { push: 'skipped', reason: 'no_tracking_remote' } as const;
+    if (branch.code !== 0) return false;
     const remote = await git(session, ['config', '--get', `branch.${branch.stdout.trim()}.remote`]);
     const merge = await git(session, ['config', '--get', `branch.${branch.stdout.trim()}.merge`]);
-    if (remote.code !== 0 || merge.code !== 0 || !remote.stdout.trim() || remote.stdout.trim() === '.') return { push: 'skipped', reason: 'no_tracking_remote' } as const;
-    const push = await git(session, ['push', '--', remote.stdout.trim(), `HEAD:${merge.stdout.trim()}`]);
-    if (push.code !== 0) throw opError('git_push_unavailable', 'The canonical commit is durable locally; its push will retry.',
-      `git push to ${remote.stdout.trim()} failed (network, credentials or a rejected non-fast-forward). Nothing is lost locally and the worker pushes again on a later pass; gbrain never pulls or rebases the checkout. If it keeps failing, check the remote and its credentials with git push on the brain host.`,
-      { fix: effectStatusFix });
-    return { push: 'committed' } as const;
+    return remote.code === 0 && merge.code === 0 && !!remote.stdout.trim() && remote.stdout.trim() !== '.';
   });
+  if (!tracked) return { push: 'skipped', reason: 'no_tracking_remote' } as const;
+  signal?.throwIfAborted();
+  try {
+    // publishWaitMs 0: a busy publish lock leaves a request the running publisher honors, and this effect retries.
+    await withFilesystemPublication([root], async () => commitAndPush({ repo: root, pushOnly: true, publishWaitMs: 0, keepCheckout: true }));
+  } catch (error) {
+    if ((error as { code?: string }).code !== 'push_unconfirmed') throw error;
+    throw opError('git_push_unavailable', 'The canonical commit is durable locally; its push will retry.',
+      `${(error as Error).message} Nothing is lost locally and the worker pushes again on a later pass, merging remote commits in memory; gbrain never pulls or rebases the checkout. If it keeps failing, check the remote and its credentials with git push on the brain host.`,
+      { fix: effectStatusFix });
+  }
+  return { push: 'committed' } as const;
 }
 
 /** The outcome a Git effect records when its root has no durability hook: no git command ran. */

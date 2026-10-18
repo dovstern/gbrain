@@ -152,7 +152,8 @@ for (const kind of testBackends()) describe(`#5530 Git effect coalescing (${kind
     await release(engine);
     await pass(engine);
     expect(repo.commits() - commitsBefore).toBe(1);
-    expect(repo.pushes()).toBe(1);
+    // commit-push retries a rejection once when the remote has not moved; still one push per pass, not per effect.
+    expect(repo.pushes()).toBe(2);
     expect(await gitStates(engine)).toEqual({ queued: 6 });
     expect(new Set((await engine.executeRaw<{ error_code: string }>("SELECT error_code FROM persistence_effects WHERE kind='git'")).map(r => r.error_code)))
       .toEqual(new Set(['git_push_unavailable']));
@@ -161,7 +162,7 @@ for (const kind of testBackends()) describe(`#5530 Git effect coalescing (${kind
     await pass(engine);
     expect(await gitStates(engine)).toEqual({ committed: 6 });
     expect(repo.commits() - commitsBefore).toBe(1);
-    expect(repo.pushes()).toBe(2);
+    expect(repo.pushes()).toBe(3);
     expect(git(repo.remote, 'rev-parse', 'main').trim()).toBe(git(repo.root, 'rev-parse', 'HEAD').trim());
   }), 300_000);
 

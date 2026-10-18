@@ -454,9 +454,11 @@ is reserved before touching a file; insufficient capacity leaves the withdrawal
 effective and its physical mirror queued.
 
 Git work runs only for repositories already opted into durability hardening.
-It commits the affected file without invoking legacy hooks, then attempts a
-plain push to the configured tracking remote. It never pulls or rebases source
-files. An unconfigured remote is reported as a skipped push. Embeddings wait
+It commits the affected file without invoking legacy hooks, then pushes to the
+configured tracking remote. A push rejected because the remote moved is merged
+with the remote in memory and the merge is pushed
+([shared-checkout Git](shared-checkout-git.md)); the checkout itself never
+moves, and it never pulls or rebases source files. An unconfigured remote is reported as a skipped push. Embeddings wait
 for an enabled, configured provider and install only if the page revision and
 its text projection still match.
 

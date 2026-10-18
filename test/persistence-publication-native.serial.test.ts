@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -264,11 +264,9 @@ test('lost completion acknowledgment reclaims the same Git effect without anothe
 test('a rejected journal push retains its local commit and retries the same effect', async () => {
   const f = await fixture();
   const base = git(f.root, 'rev-parse', 'HEAD').trim();
-  git(f.remote, 'config', 'receive.denyNonFastForwards', 'true');
-  writeFileSync(join(f.root, 'remote-only.md'), 'Remote ahead\n'); git(f.root, 'add', 'remote-only.md');
-  git(f.root, '-c', 'core.hooksPath=', 'commit', '-m', 'Remote ahead'); git(f.root, 'push');
+  // A remote that refuses every push (a remote that only moved is integrated instead: persistence-effect-git-diverged-push).
+  writeFileSync(join(f.remote, 'hooks', 'pre-receive'), '#!/bin/sh\nexit 1\n'); chmodSync(join(f.remote, 'hooks', 'pre-receive'), 0o755);
   const remoteHead = git(f.remote, 'rev-parse', 'refs/heads/main');
-  git(f.root, 'reset', '--hard', base);
   writeFileSync(join(f.root, 'unrelated.md'), 'Staged\n'); git(f.root, 'add', 'unrelated.md');
   const index = git(f.root, 'ls-files', '--stage', '-z', '--', 'unrelated.md');
   const { row, receipt, effect } = await publish(f, 'notes/rejected');
@@ -279,12 +277,12 @@ test('a rejected journal push retains its local commit and retries the same effe
   expect(git(f.root, 'show', `HEAD:${target}`)).toBe('Published\n');
   expect(git(f.root, 'rev-list', '--count', `${base}..HEAD`)).toBe('1\n');
   expect(git(f.remote, 'rev-parse', 'refs/heads/main')).toBe(remoteHead);
-  expect(git(f.remote, 'ls-tree', '-r', '--name-only', 'refs/heads/main')).toBe('initial.md\nremote-only.md\n');
+  expect(git(f.remote, 'ls-tree', '-r', '--name-only', 'refs/heads/main')).toBe('initial.md\n');
   expect(git(f.root, 'ls-files', '--stage', '-z', '--', 'unrelated.md')).toBe(index);
   expect(await getWriteRequestById(engine, row.id)).toEqual(receipt);
   expect((await publicEffectsForRequest(engine, row.id)).find(item => item.kind === 'git'))
     .toEqual({ kind: 'git', state: 'queued', reason: 'git_push_unavailable' });
-  git(f.remote, 'update-ref', 'refs/heads/main', base);
+  rmSync(join(f.remote, 'hooks', 'pre-receive'));
   expect(await run(effect.id)).toMatchObject({ id: effect.id, request_id: row.id, attempts: 2,
     state: 'committed', error_code: null, data: effect.data, outcome: { git: 'unchanged', push: 'committed' } });
   expectBlob(f, target);

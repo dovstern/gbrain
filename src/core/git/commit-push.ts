@@ -88,6 +88,8 @@ export interface CommitPushOptions {
   advanceOnlyWhenClean?: boolean;
   /** Push-only: publish HEAD to this remote branch instead of the checked-out branch's upstream (the helper's `--push-only <branch>`). */
   branch?: string;
+  /** Publish without moving the checkout: a managed worktree's owner never imports remote files (`gbrain sources refresh` does). */
+  keepCheckout?: boolean;
 }
 
 export type Resolution = { kind: 'ours' } | { kind: 'theirs' } | { kind: 'file'; path: string };
@@ -721,7 +723,7 @@ export function commitAndPush(opts: CommitPushOptions): CommitPushResult {
       const head = gitOk(root, ['rev-parse', 'HEAD'], 'rev-parse HEAD');
       const published = publish(ctx, start && !isAncestor(root, start, head) ? start : head, resolutions, opts.expectRemote, cwd);
       if (!elsewhere) rmSync(absGitPath(root, CONFLICT_STATE_NAME), { force: true });
-      const moved = published.sha === head || elsewhere ? { checkout: 'unchanged' as const } : advanceWithLock(root, published.sha, head, onlyWhenClean, opts.lockWaitMs);
+      const moved = published.sha === head || elsewhere || opts.keepCheckout ? { checkout: 'unchanged' as const } : advanceWithLock(root, published.sha, head, onlyWhenClean, opts.lockWaitMs);
       return { published, moved };
     } catch (e) {
       if ((e as { code?: string }).code === 'integrate_conflict' && !elsewhere) recordConflict(root, ctx.branch, e);

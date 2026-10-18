@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { publishGitEffect } from '../src/core/persistence/effect-git.ts';
 import { gitAsync as git, gitFixtureAsync as gitFixture, type GitFixture } from './helpers/git-publication.ts';
@@ -63,16 +63,13 @@ test('unchanged replay, missing target and tracked deletion keep distinct outcom
 
 test('push rejection leaves one durable local commit and retries it unchanged', async () => {
   const f = await fixture();
-  await git(f.remote, 'config', 'receive.denyNonFastForwards', 'true');
-  const original = (await git(f.root, 'rev-parse', 'HEAD')).trim();
-  writeFileSync(join(f.root, 'ahead.md'), 'Remote ahead\n');
-  await git(f.root, 'add', 'ahead.md'); await git(f.root, '-c', 'core.hooksPath=', 'commit', '-m', 'Remote ahead');
-  await git(f.root, 'push'); await git(f.root, 'reset', '--hard', original);
+  // A remote that refuses every push (a remote that only moved is integrated instead: persistence-effect-git-diverged-push).
+  writeFileSync(join(f.remote, 'hooks', 'pre-receive'), '#!/bin/sh\nexit 1\n'); chmodSync(join(f.remote, 'hooks', 'pre-receive'), 0o755);
   writeFileSync(join(f.root, 'page.md'), 'Local durable\n');
   await expect(publishGitEffect(f.root, 'page.md')).rejects.toMatchObject({ code: 'git_push_unavailable' });
   expect(await git(f.root, 'show', 'HEAD:page.md')).toBe('Local durable\n');
   const head = await git(f.root, 'rev-parse', 'HEAD');
-  await git(f.remote, 'update-ref', 'refs/heads/main', original);
+  rmSync(join(f.remote, 'hooks', 'pre-receive'));
   expect(await publishGitEffect(f.root, 'page.md')).toEqual({ git: 'unchanged', push: 'committed' });
   expect(await git(f.root, 'rev-parse', 'HEAD')).toBe(head);
   await published(f, 'page.md', 'Local durable\n');
